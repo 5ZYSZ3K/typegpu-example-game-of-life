@@ -1,6 +1,6 @@
 /* generated via tgpu-gen by TypeGPU */
-import tgpu from "typegpu";
-import * as d from "typegpu/data";
+import tgpu from 'typegpu';
+import * as d from 'typegpu/data';
 
 /* structs */
 export const Out = d.struct({
@@ -9,7 +9,7 @@ export const Out = d.struct({
 });
 
 /* bindGroupLayouts */
-export const bindGroupLayoutRender = tgpu.bindGroupLayout({
+export const layout0 = tgpu.bindGroupLayout({
   size: {
     uniform: d.vec2u,
   },

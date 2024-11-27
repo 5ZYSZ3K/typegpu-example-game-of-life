@@ -3,7 +3,7 @@ import tgpu from "typegpu";
 import * as d from "typegpu/data";
 
 /* bindGroupLayouts */
-export const bindGroupLayoutCompute = tgpu.bindGroupLayout({
+export const layout0 = tgpu.bindGroupLayout({
   size: {
     storage: d.vec2u,
     access: "readonly",

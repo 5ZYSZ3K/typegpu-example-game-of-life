@@ -3,8 +3,8 @@ import vertWGSL from "./vert.wgsl?raw";
 import fragWGSL from "./frag.wgsl?raw";
 import tgpu, { TgpuBuffer, Storage } from "typegpu";
 import { arrayOf, TgpuArray, U32, u32, vec2u } from "typegpu/data";
-import { bindGroupLayoutCompute } from "./definitions/compute";
-import { bindGroupLayoutRender } from "./definitions/vert";
+import { layout0 as bindGroupLayoutCompute } from "./definitions/compute";
+import { layout0 as bindGroupLayoutRender } from "./definitions/vert";
 
 const canvas = document.querySelector("canvas") as HTMLCanvasElement;
 const root = await tgpu.init();
