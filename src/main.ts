@@ -8,6 +8,7 @@ import { layout0 as bindGroupLayoutRender } from "./definitions/vert";
 
 const canvas = document.querySelector("canvas") as HTMLCanvasElement;
 const root = await tgpu.init();
+const device = root.device;
 
 const context = canvas.getContext("webgpu") as GPUCanvasContext;
 const devicePixelRatio = window.devicePixelRatio;
@@ -16,7 +17,7 @@ canvas.height = canvas.clientHeight * devicePixelRatio;
 const presentationFormat = navigator.gpu.getPreferredCanvasFormat();
 
 context.configure({
-  device: root.device,
+  device,
   format: presentationFormat,
 });
 
@@ -27,7 +28,7 @@ const GameOptions = {
   workgroupSize: 8,
 };
 
-const computeShader = root.device.createShaderModule({ code: computeWGSL });
+const computeShader = device.createShaderModule({ code: computeWGSL });
 
 const squareBuffer = root
   .createBuffer(arrayOf(u32, 8), [0, 0, 0, 1, 1, 0, 1, 1])
@@ -45,8 +46,8 @@ const squareStride: GPUVertexBufferLayout = {
   ],
 };
 
-const vertexShader = root.device.createShaderModule({ code: vertWGSL });
-const fragmentShader = root.device.createShaderModule({ code: fragWGSL });
+const vertexShader = device.createShaderModule({ code: vertWGSL });
+const fragmentShader = device.createShaderModule({ code: fragWGSL });
 let commandEncoder: GPUCommandEncoder;
 
 const cellsStride: GPUVertexBufferLayout = {
@@ -69,8 +70,8 @@ let wholeTime = 0,
 let render: () => void;
 function resetGameData() {
   // compute pipeline
-  const computePipeline = root.device.createComputePipeline({
-    layout: root.device.createPipelineLayout({
+  const computePipeline = device.createComputePipeline({
+    layout: device.createPipelineLayout({
       bindGroupLayouts: [root.unwrap(bindGroupLayoutCompute)],
     }),
     compute: {
@@ -110,8 +111,8 @@ function resetGameData() {
     next: buffer0,
   });
 
-  const renderPipeline = root.device.createRenderPipeline({
-    layout: root.device.createPipelineLayout({
+  const renderPipeline = device.createRenderPipeline({
+    layout: device.createPipelineLayout({
       bindGroupLayouts: [root.unwrap(bindGroupLayoutRender)],
     }),
     primitive: {
@@ -147,7 +148,7 @@ function resetGameData() {
         },
       ],
     };
-    commandEncoder = root.device.createCommandEncoder();
+    commandEncoder = device.createCommandEncoder();
 
     // compute
     const passEncoderCompute = commandEncoder.beginComputePass();
@@ -173,7 +174,7 @@ function resetGameData() {
     passEncoderRender.draw(4, length);
     passEncoderRender.end();
 
-    root.device.queue.submit([commandEncoder.finish()]);
+    device.queue.submit([commandEncoder.finish()]);
   };
 }
 
