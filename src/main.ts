@@ -1,37 +1,62 @@
-import computeWGSL from "./compute.wgsl?raw";
-import vertWGSL from "./vert.wgsl?raw";
-import fragWGSL from "./frag.wgsl?raw";
-import tgpu, { TgpuBuffer, Storage } from "typegpu";
-import { arrayOf, TgpuArray, U32, u32, vec2u } from "typegpu/data";
-import { layout0 as bindGroupLayoutCompute } from "./definitions/compute";
-import { layout0 as bindGroupLayoutRender } from "./definitions/vert";
+import tgpu from "typegpu";
+import { arrayOf, u32, vec2u } from "typegpu/data";
 
-const canvas = document.querySelector("canvas") as HTMLCanvasElement;
 const root = await tgpu.init();
 const device = root.device;
 
+const canvas = document.querySelector("canvas") as HTMLCanvasElement;
 const context = canvas.getContext("webgpu") as GPUCanvasContext;
 const devicePixelRatio = window.devicePixelRatio;
 canvas.width = canvas.clientWidth * devicePixelRatio;
 canvas.height = canvas.clientHeight * devicePixelRatio;
 const presentationFormat = navigator.gpu.getPreferredCanvasFormat();
-
 context.configure({
   device,
   format: presentationFormat,
 });
 
-const GameOptions = {
-  width: 128,
-  height: 128,
-  timestep: 4,
-  workgroupSize: 8,
-};
+let workgroupSize = 16;
+let gameWidth = 1024;
+let gameHeight = 1024;
+let timestep = 4;
 
-const computeShader = device.createShaderModule({ code: computeWGSL });
+const computeShader = device.createShaderModule({
+  code: `
+@binding(0) @group(0) var<storage, read> size: vec2u;
+@binding(1) @group(0) var<storage, read> current: array<u32>;
+@binding(2) @group(0) var<storage, read_write> next: array<u32>;
+
+override blockSize = 8;
+
+fn getIndex(x: u32, y: u32) -> u32 {
+  let h = size.y;
+  let w = size.x;
+
+  return (y % h) * w + (x % w);
+}
+
+fn getCell(x: u32, y: u32) -> u32 {
+  return current[getIndex(x, y)];
+}
+
+fn countNeighbors(x: u32, y: u32) -> u32 {
+  return getCell(x - 1, y - 1) + getCell(x, y - 1) + getCell(x + 1, y - 1) + 
+         getCell(x - 1, y) +                         getCell(x + 1, y) + 
+         getCell(x - 1, y + 1) + getCell(x, y + 1) + getCell(x + 1, y + 1);
+}
+
+@compute @workgroup_size(blockSize, blockSize)
+fn main(@builtin(global_invocation_id) grid: vec3u) {
+  let x = grid.x;
+  let y = grid.y;
+  let n = countNeighbors(x, y);
+  next[getIndex(x, y)] = select(u32(n == 3u), u32(n == 2u || n == 3u), getCell(x, y) == 1u); 
+} 
+`,
+});
 
 const squareBuffer = root
-  .createBuffer(arrayOf(u32, 8), [0, 0, 0, 1, 1, 0, 1, 1])
+  .createBuffer(arrayOf(u32, 8), [0, 0, 1, 0, 0, 1, 1, 1])
   .$usage("vertex");
 
 const squareStride: GPUVertexBufferLayout = {
@@ -46,8 +71,40 @@ const squareStride: GPUVertexBufferLayout = {
   ],
 };
 
-const vertexShader = device.createShaderModule({ code: vertWGSL });
-const fragmentShader = device.createShaderModule({ code: fragWGSL });
+const vertexShader = device.createShaderModule({
+  code: `
+struct Out {
+  @builtin(position) pos: vec4f,
+  @location(0) cell: f32,
+}
+
+@binding(0) @group(0) var<uniform> size: vec2u;
+
+@vertex
+fn main(@builtin(instance_index) i: u32, @location(0) cell: u32, @location(1) pos: vec2u) -> Out {
+  let w = size.x;
+  let h = size.y;
+  let x = (f32(i % w + pos.x) / f32(w) - 0.5) * 2. * f32(w) / f32(max(w, h));
+  let y = (f32((i - (i % w)) / w + pos.y) / f32(h) - 0.5) * 2. * f32(h) / f32(max(w, h));
+
+  return Out(
+    vec4f(x, y, 0., 1.),
+    f32(cell),
+  );
+}`,
+});
+const fragmentShader = device.createShaderModule({
+  code: `
+@fragment
+fn main(@location(0) cell: f32, @builtin(position) pos: vec4f) -> @location(0) vec4f {
+  return vec4f(
+    max(f32(cell) * pos.x / 1024, 0), 
+    max(f32(cell) * pos.y / 1024, 0), 
+    max(f32(cell) * (1 - pos.x / 1024), 0),
+    1.
+  );
+}`,
+});
 let commandEncoder: GPUCommandEncoder;
 
 const cellsStride: GPUVertexBufferLayout = {
@@ -62,39 +119,63 @@ const cellsStride: GPUVertexBufferLayout = {
   ],
 };
 
-let wholeTime = 0,
-  loopTimes = 0,
-  buffer0: TgpuBuffer<TgpuArray<U32>> & Storage,
-  buffer1: TgpuBuffer<TgpuArray<U32>> & Storage;
+const layoutCompute = {
+  size: {
+    storage: vec2u,
+    access: "readonly",
+  },
+  current: {
+    storage: (arrayLength: number) => arrayOf(u32, arrayLength),
+    access: "readonly",
+  },
+  next: {
+    storage: (arrayLength: number) => arrayOf(u32, arrayLength),
+    access: "mutable",
+  },
+} as const;
+const groupLayout = {
+  size: {
+    uniform: vec2u,
+  },
+} as const;
 
-let render: () => void;
-function resetGameData() {
-  // compute pipeline
-  const computePipeline = device.createComputePipeline({
-    layout: device.createPipelineLayout({
-      bindGroupLayouts: [root.unwrap(bindGroupLayoutCompute)],
-    }),
-    compute: {
-      module: computeShader,
-      constants: {
-        blockSize: GameOptions.workgroupSize,
-      },
+const bindGroupLayoutCompute = tgpu.bindGroupLayout(layoutCompute);
+const bindGroupLayoutRender = tgpu.bindGroupLayout(groupLayout);
+
+// compute pipeline
+const computePipeline = device.createComputePipeline({
+  layout: device.createPipelineLayout({
+    bindGroupLayouts: [root.unwrap(bindGroupLayoutCompute)],
+  }),
+  compute: {
+    module: computeShader,
+    constants: {
+      blockSize: workgroupSize,
     },
-  });
+  },
+});
+let currentInterval: number | undefined;
+let render: (swap: boolean) => void;
+let loop: (swap: boolean) => void;
+let swap = false;
+
+const resetGameData = () => {
   const sizeBuffer = root
-    .createBuffer(vec2u, vec2u(GameOptions.width, GameOptions.height))
+    .createBuffer(vec2u, vec2u(gameWidth, gameHeight))
     .$usage("uniform")
     .$usage("storage");
-  const length = GameOptions.width * GameOptions.height;
-  const cells = Array.from({ length }).fill(0) as number[];
-  for (let i = 0; i < length; i++) {
-    cells[i] = Math.random() < 0.25 ? 1 : 0;
-  }
-  buffer0 = root
+
+  const length = gameWidth * gameHeight;
+  const cells = Array.from({ length })
+    .fill(0)
+    .map((_, i) => (Math.random() < 0.25 ? 1 : 0));
+
+  const buffer0 = root
     .createBuffer(arrayOf(u32, length), cells)
     .$usage("storage")
     .$usage("vertex");
-  buffer1 = root
+
+  const buffer1 = root
     .createBuffer(arrayOf(u32, length))
     .$usage("storage")
     .$usage("vertex");
@@ -111,33 +192,11 @@ function resetGameData() {
     next: buffer0,
   });
 
-  const renderPipeline = device.createRenderPipeline({
-    layout: device.createPipelineLayout({
-      bindGroupLayouts: [root.unwrap(bindGroupLayoutRender)],
-    }),
-    primitive: {
-      topology: "triangle-strip",
-    },
-    vertex: {
-      module: vertexShader,
-      buffers: [cellsStride, squareStride],
-    },
-    fragment: {
-      module: fragmentShader,
-      targets: [
-        {
-          format: presentationFormat,
-        },
-      ],
-    },
-  });
-
   const uniformBindGroup = bindGroupLayoutRender.populate({
     size: sizeBuffer,
   });
 
-  loopTimes = 0;
-  render = () => {
+  render = (swap: boolean) => {
     const view = context.getCurrentTexture().createView();
     const renderPass: GPURenderPassDescriptor = {
       colorAttachments: [
@@ -148,47 +207,70 @@ function resetGameData() {
         },
       ],
     };
-    commandEncoder = device.createCommandEncoder();
 
-    // compute
+    commandEncoder = device.createCommandEncoder();
     const passEncoderCompute = commandEncoder.beginComputePass();
+
     passEncoderCompute.setPipeline(computePipeline);
     passEncoderCompute.setBindGroup(
       0,
-      root.unwrap(loopTimes ? bindGroup1 : bindGroup0)
+      root.unwrap(swap ? bindGroup1 : bindGroup0)
     );
+
     passEncoderCompute.dispatchWorkgroups(
-      GameOptions.width / GameOptions.workgroupSize,
-      GameOptions.height / GameOptions.workgroupSize
+      gameWidth / workgroupSize,
+      gameHeight / workgroupSize
     );
     passEncoderCompute.end();
-    // render
+
     const passEncoderRender = commandEncoder.beginRenderPass(renderPass);
     passEncoderRender.setPipeline(renderPipeline);
-    passEncoderRender.setVertexBuffer(
-      0,
-      root.unwrap(loopTimes ? buffer1 : buffer0)
-    );
+
+    passEncoderRender.setVertexBuffer(0, root.unwrap(swap ? buffer1 : buffer0));
     passEncoderRender.setVertexBuffer(1, root.unwrap(squareBuffer));
     passEncoderRender.setBindGroup(0, root.unwrap(uniformBindGroup));
+
     passEncoderRender.draw(4, length);
     passEncoderRender.end();
-
     device.queue.submit([commandEncoder.finish()]);
   };
-}
+
+  loop = () => {
+    requestAnimationFrame(() => {
+      render(swap);
+      swap = !swap;
+    });
+  };
+
+  startGame();
+};
+
+const startGame = () => {
+  if (currentInterval) clearInterval(currentInterval as unknown as number);
+  currentInterval = setInterval(() => {
+    loop(swap);
+  }, timestep);
+};
 
 resetGameData();
 
-(function loop() {
-  if (GameOptions.timestep) {
-    wholeTime++;
-    if (wholeTime >= GameOptions.timestep) {
-      render();
-      wholeTime -= GameOptions.timestep;
-      loopTimes = 1 - loopTimes;
-    }
-  }
-
-  requestAnimationFrame(loop);
-})();
+const renderPipeline = device.createRenderPipeline({
+  layout: device.createPipelineLayout({
+    bindGroupLayouts: [root.unwrap(bindGroupLayoutRender)],
+  }),
+  primitive: {
+    topology: "triangle-strip",
+  },
+  vertex: {
+    module: vertexShader,
+    buffers: [cellsStride, squareStride],
+  },
+  fragment: {
+    module: fragmentShader,
+    targets: [
+      {
+        format: presentationFormat,
+      },
+    ],
+  },
+});
